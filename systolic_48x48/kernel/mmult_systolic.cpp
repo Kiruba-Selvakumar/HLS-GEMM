@@ -1,0 +1,256 @@
+#include <hls_stream.h>
+#include <ap_int.h>
+#include <stdint.h>
+
+// --- Architecture Configuration ---
+// SA_DIM = 32 (1024 DSPs)
+// Reduced from 48 to fix "Congestion Level 7" routing errors.
+#define SA_DIM 32
+
+// Block sizes for memory tiling
+#define TILE_M SA_DIM
+#define TILE_N SA_DIM
+#define TILE_P SA_DIM
+
+// Maximum Matrix Size (Must hold full Row-Strip of A)
+#define MAX_SIZE 1024
+
+// Vector width for 512-bit memory access
+#define VEC_WIDTH 16
+
+union fp_bit_cast {
+    uint32_t i;
+    float f;
+};
+
+extern "C" {
+
+/**
+ * mmult_systolic (Optimized for 96x96 Co-Sim)
+ * Fix: Depth changed from 4096 to 576 to match 96x96 testbench size.
+ */
+void mmult_systolic(
+    const ap_uint<512> *A,
+    const ap_uint<512> *B,    // Transposed B
+    ap_uint<512> *C,
+    int M,
+    int N,
+    int P
+    )
+{
+    // Interface Definition
+    // FIX: Depth set to 576 (96*96/16) to match testbench allocation.
+    // This prevents SIGSEGV during Co-Simulation.
+#pragma HLS INTERFACE m_axi port=A offset=slave bundle=gmem0 depth=576 latency=64
+#pragma HLS INTERFACE m_axi port=B offset=slave bundle=gmem1 depth=576 latency=64
+#pragma HLS INTERFACE m_axi port=C offset=slave bundle=gmem2 depth=576 latency=64
+    
+#pragma HLS INTERFACE s_axilite port=A bundle=control
+#pragma HLS INTERFACE s_axilite port=B bundle=control
+#pragma HLS INTERFACE s_axilite port=C bundle=control
+#pragma HLS INTERFACE s_axilite port=M bundle=control
+#pragma HLS INTERFACE s_axilite port=N bundle=control
+#pragma HLS INTERFACE s_axilite port=P bundle=control
+#pragma HLS INTERFACE s_axilite port=return bundle=control
+
+    // -----------------------------------------------------------------------
+    // Local Buffers
+    // -----------------------------------------------------------------------
+    
+    // A_local: Stores entire Row-Strip (SA_DIM rows x N cols)
+    // FIX: Added ARRAY_RESHAPE to prevent URAM explosion.
+    // Instead of 16 separate RAMs (768 total), this creates 1 wide RAM per row.
+    float A_local[SA_DIM][MAX_SIZE]; 
+    #pragma HLS BIND_STORAGE variable=A_local type=ram_2p impl=uram
+    #pragma HLS ARRAY_PARTITION variable=A_local complete dim=1
+    #pragma HLS ARRAY_RESHAPE variable=A_local cyclic factor=16 dim=2
+
+    // B_local: Stores Column-Strip (SA_DIM rows x N cols) - Transposed view
+    // FIX: Added ARRAY_RESHAPE to conserve BRAM usage.
+    float B_local[SA_DIM][MAX_SIZE];
+    #pragma HLS ARRAY_PARTITION variable=B_local complete dim=1
+    #pragma HLS ARRAY_RESHAPE variable=B_local cyclic factor=16 dim=2
+
+    float C_local[SA_DIM][SA_DIM];
+    #pragma HLS ARRAY_PARTITION variable=C_local complete dim=0
+
+    // -----------------------------------------------------------------------
+    // Execution Loop
+    // -----------------------------------------------------------------------
+    
+    // Loop over Row Strips of A
+    for (int r = 0; r < M; r += SA_DIM) {
+        #pragma HLS LOOP_TRIPCOUNT min=2 max=2
+
+        // --- HOISTED LOAD A ---
+        Load_A_Strip:
+        for (int i = 0; i < SA_DIM; i++) {
+            #pragma HLS LOOP_TRIPCOUNT min=32 max=32
+            int global_row = r + i;
+            
+            // Burst read entire width N
+            for (int k = 0; k < N; k += VEC_WIDTH) {
+                #pragma HLS PIPELINE II=1
+                #pragma HLS LOOP_TRIPCOUNT min=6 max=6
+                
+                if (global_row < M) {
+                    int vec_idx = (global_row * N + k) / VEC_WIDTH;
+                    ap_uint<512> raw_vec = A[vec_idx];
+
+                    for (int v = 0; v < VEC_WIDTH; v++) {
+                        #pragma HLS UNROLL
+                        if (k + v < N) {
+                            fp_bit_cast c;
+                            c.i = raw_vec.range(32*(v+1)-1, 32*v);
+                            A_local[i][k+v] = c.f;
+                        }
+                    }
+                } else {
+                    for (int v = 0; v < VEC_WIDTH; v++) {
+                        #pragma HLS UNROLL
+                         if (k + v < N) A_local[i][k+v] = 0.0f;
+                    }
+                }
+            }
+        }
+
+        // Loop over Column Strips of C
+        for (int c = 0; c < P; c += SA_DIM) {
+            #pragma HLS LOOP_TRIPCOUNT min=2 max=2
+
+            // 1. Initialize Accumulator
+            Init_PEs:
+            for(int i=0; i<SA_DIM; i++) {
+                #pragma HLS UNROLL
+                for(int j=0; j<SA_DIM; j++) {
+                    #pragma HLS UNROLL
+                    C_local[i][j] = 0.0f;
+                }
+            }
+
+            // 2. Compute Tile (Iterate Depth N)
+            
+            // Load B Strip (Transposed Row)
+            Load_B_Strip:
+            for (int j = 0; j < SA_DIM; j++) {
+                #pragma HLS LOOP_TRIPCOUNT min=32 max=32
+                int global_col = c + j; 
+
+                for (int k = 0; k < N; k += VEC_WIDTH) {
+                    #pragma HLS PIPELINE II=1
+                    #pragma HLS LOOP_TRIPCOUNT min=6 max=6
+
+                    if (global_col < P) {
+                         int vec_idx = (global_col * N + k) / VEC_WIDTH;
+                         ap_uint<512> raw_vec = B[vec_idx];
+
+                         for (int v = 0; v < VEC_WIDTH; v++) {
+                            #pragma HLS UNROLL
+                            if (k + v < N) {
+                                fp_bit_cast c;
+                                c.i = raw_vec.range(32*(v+1)-1, 32*v);
+                                B_local[j][k+v] = c.f;
+                            }
+                         }
+                    } else {
+                        for (int v = 0; v < VEC_WIDTH; v++) {
+                            #pragma HLS UNROLL
+                             if (k + v < N) B_local[j][k+v] = 0.0f;
+                        }
+                    }
+                }
+            }
+
+            // Systolic Execution
+            float val_A[SA_DIM][SA_DIM];
+            #pragma HLS ARRAY_PARTITION variable=val_A complete dim=0
+            float val_B[SA_DIM][SA_DIM];
+            #pragma HLS ARRAY_PARTITION variable=val_B complete dim=0
+
+            Init_Shift_Regs:
+            for(int i=0; i<SA_DIM; i++) {
+                #pragma HLS UNROLL
+                for(int j=0; j<SA_DIM; j++) {
+                    #pragma HLS UNROLL
+                    val_A[i][j] = 0.0f; val_B[i][j] = 0.0f;
+                }
+            }
+
+            // Run for Depth N + Pipeline Drain
+            Systolic_Run:
+            for (int t = 0; t < N + (2 * SA_DIM); t++) {
+                #pragma HLS PIPELINE II=1
+                #pragma HLS LOOP_TRIPCOUNT min=192 max=192
+
+                // Shift
+                for (int i = 0; i < SA_DIM; i++) {
+                    #pragma HLS UNROLL
+                    for (int j = SA_DIM - 1; j >= 1; j--) {
+                        #pragma HLS UNROLL
+                        val_A[i][j] = val_A[i][j-1];
+                    }
+                }
+                for (int j = 0; j < SA_DIM; j++) {
+                    #pragma HLS UNROLL
+                    for (int i = SA_DIM - 1; i >= 1; i--) {
+                        #pragma HLS UNROLL
+                        val_B[i][j] = val_B[i-1][j];
+                    }
+                }
+
+                // Feed
+                for (int i = 0; i < SA_DIM; i++) {
+                    #pragma HLS UNROLL
+                    int k_idx = t - i;
+                    if (k_idx >= 0 && k_idx < N) val_A[i][0] = A_local[i][k_idx];
+                    else val_A[i][0] = 0.0f;
+                }
+                for (int j = 0; j < SA_DIM; j++) {
+                    #pragma HLS UNROLL
+                    int k_idx = t - j;
+                    if (k_idx >= 0 && k_idx < N) val_B[0][j] = B_local[j][k_idx];
+                    else val_B[0][j] = 0.0f;
+                }
+
+                // Compute
+                for (int i = 0; i < SA_DIM; i++) {
+                    #pragma HLS UNROLL
+                    for (int j = 0; j < SA_DIM; j++) {
+                        #pragma HLS UNROLL
+                        #pragma HLS BIND_OP variable=C_local op=fmul impl=dsp
+                        #pragma HLS BIND_OP variable=C_local op=fadd impl=dsp
+                        C_local[i][j] += val_A[i][j] * val_B[i][j];
+                    }
+                }
+            }
+
+            // Write Back
+            Write_C:
+            for (int i = 0; i < SA_DIM; i++) {
+                #pragma HLS LOOP_TRIPCOUNT min=32 max=32
+                int global_row = r + i;
+                for (int j = 0; j < SA_DIM; j += VEC_WIDTH) {
+                    #pragma HLS PIPELINE II=1
+                    #pragma HLS LOOP_TRIPCOUNT min=2 max=2
+                    
+                    if (global_row < M) {
+                        int vec_idx = (global_row * P + (c + j)) / VEC_WIDTH;
+                        ap_uint<512> out_vec;
+                        for (int v = 0; v < VEC_WIDTH; v++) {
+                            #pragma HLS UNROLL
+                            if (j + v < SA_DIM && (c + j + v) < P) {
+                                fp_bit_cast c_cast;
+                                c_cast.f = C_local[i][j+v];
+                                out_vec.range(32*(v+1)-1, 32*v) = c_cast.i;
+                            } else {
+                                out_vec.range(32*(v+1)-1, 32*v) = 0;
+                            }
+                        }
+                        C[vec_idx] = out_vec;
+                    }
+                }
+            }
+        } // End Col loop
+    } // End Row loop
+}
+}

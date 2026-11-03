@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""
+collect_hls_results.py — Extract Vitis HLS synthesis estimates for every GEMM
+design in this repo and emit a Markdown resource/timing table.
+
+It reads the top-level `*_csynth.rpt` that Vitis HLS / v++ leaves under each
+design's build tree (`kernel/_x/reports/<top>/hls_reports/` or
+`build/hls/hls/syn/report/`) and pulls out:
+  - target device, target clock, estimated clock
+  - worst-case latency (cycles / absolute) when the design has a bounded latency
+  - resource totals (DSP, BRAM_18K, URAM, FF, LUT) and full-device utilisation %
+
+Usage:
+    python3 scripts/collect_hls_results.py            # print Markdown to stdout
+    python3 scripts/collect_hls_results.py -o RESULTS_table.md
+
+NOTE: these are *synthesis estimates*, not on-board measurements, and the
+latency column reflects whatever problem size each kernel was last synthesized
+for (their LOOP_TRIPCOUNT pragmas differ). For measured throughput, run the host
+and use scripts/run_bench.sh.
+"""
+import re, os, glob, argparse
+
+# (directory, HLS top-function name)
+DESIGNS = [
+    ("fpga-matrix-mult",                 "mmult_base"),
+    ("Tile_16_Mat_Mult_FP32",            "mmult"),
+    ("Tile_32_Mat_Mult",                 "mmult"),
+    ("accelerated-matrix-mul",           "mmult"),
+    ("mmult_dataflow",                   "mmult"),
+    ("systolic_32x32",                   "mmult_systolic"),
+    ("systolic_48x48",                   "mmult_systolic"),
+    ("systolic_32x32_dataflow",          "mmult_systolic"),
+    ("sys_32x32_dataflow_double_buffe",  "mmult_systolic"),
+    ("systolic_int8_32x32",              "mmult_systolic"),
+]
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def find_report(d, top):
+    cands = [
+        f"{d}/kernel/_x/reports/{top}/hls_reports/{top}_csynth.rpt",
+        f"{d}/build/hls/hls/syn/report/{top}_csynth.rpt",
+    ]
+    cands += glob.glob(f"{d}/kernel/_x/**/{top}_csynth.rpt", recursive=True)
+    for c in cands:
+        p = os.path.join(REPO, c)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def clean(s):
+    return s.strip().replace("~", "")
+
+
+def parse(path):
+    t = open(path).read()
+    r = {}
+    m = re.search(r"Target device:\s*(\S+)", t)
+    r["dev"] = m.group(1) if m else "?"
+    m = re.search(r"ap_clk\s*\|\s*([\d.]+)\s*ns\|\s*([\d.]+)\s*ns\|", t)
+    if m:
+        r["tclk"], r["eclk"] = float(m.group(1)), float(m.group(2))
+    # Latency summary — read ONLY the "+ Latency: / * Summary:" block (before
+    # "+ Detail:"), so per-instance rows can't leak in. A "?" in that block means
+    # the latency is runtime-dependent (no fixed tripcount).
+    lat_block = ""
+    mb = re.search(r"\+ Latency:.*?\* Summary:(.*?)\+ Detail:", t, re.S)
+    if mb:
+        lat_block = mb.group(1)
+    m = re.search(
+        r"\|\s*(\d+)\|\s*(\d+)\|\s*([\d.]+\s*(?:sec|ms|us|ns))\|\s*([\d.]+\s*(?:sec|ms|us|ns))\|",
+        lat_block,
+    )
+    if m:
+        r["lat_cyc"], r["lat_abs"] = int(m.group(2)), m.group(4).replace(" ", "")
+    else:
+        r["lat_cyc"], r["lat_abs"] = None, "runtime-dependent"
+    # Utilisation totals + full-device %.
+    ut = t.split("== Utilization Estimates")[-1]
+    m = re.search(
+        r"\|Total\s*\|\s*([\d~-]+)\|\s*([\d~-]+)\|\s*([\d~-]+)\|\s*([\d~-]+)\|\s*([\d~-]+)\|",
+        ut,
+    )
+    if m:
+        r["bram"], r["dsp"], r["ff"], r["lut"], r["uram"] = [clean(x) for x in m.groups()]
+    pct = re.findall(
+        r"\|Utilization \(%\)\s*\|\s*([\d~-]+)\|\s*([\d~-]+)\|\s*([\d~-]+)\|\s*([\d~-]+)\|\s*([\d~-]+)\|",
+        ut,
+    )
+    if pct:
+        r["ubram"], r["udsp"], r["uff"], r["ulut"], r["uuram"] = [clean(x) for x in pct[-1]]
+    return r
+
+
+def g(r, k, default="—"):
+    v = r.get(k, default)
+    return default if v is None else str(v)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("-o", "--output", help="write Markdown here instead of stdout")
+    args = ap.parse_args()
+
+    rows = []
+    dev = "?"
+    for d, top in DESIGNS:
+        p = find_report(d, top)
+        if not p:
+            rows.append((d, None))
+            continue
+        r = parse(p)
+        dev = r.get("dev", dev)
+        rows.append((d, r))
+
+    out = []
+    out.append("| Design | Est. clock (ns / MHz) | Latency (worst) | DSP | BRAM_18K | URAM | FF | LUT | DSP% | LUT% |")
+    out.append("|---|---|---|---|---|---|---|---|---|---|")
+    for d, r in rows:
+        if r is None:
+            out.append(f"| `{d}` | _no report — build it first_ |  |  |  |  |  |  |  |  |")
+            continue
+        eclk = r.get("eclk")
+        clk = f"{eclk:.3f} / {1000/eclk:.0f}" if eclk else "—"
+        lat = r["lat_abs"] if r.get("lat_cyc") is None else f"{r['lat_abs']} ({r['lat_cyc']:,} cyc)"
+        out.append(
+            f"| `{d}` | {clk} | {lat} | {g(r,'dsp')} | {g(r,'bram')} | "
+            f"{g(r,'uram')} | {g(r,'ff')} | {g(r,'lut')} | {g(r,'udsp')} | {g(r,'ulut')} |"
+        )
+    table = "\n".join(out)
+    header = (
+        f"<!-- Auto-generated by scripts/collect_hls_results.py -->\n"
+        f"Target device: **{dev}** · Target clock: **3.33 ns (300 MHz)** · "
+        f"Tool: **Vitis HLS 2025.1**\n\n"
+    )
+    text = header + table + "\n"
+    if args.output:
+        with open(args.output, "w") as f:
+            f.write(text)
+        print(f"wrote {args.output}")
+    else:
+        print(text)
+
+
+if __name__ == "__main__":
+    main()
