@@ -1,0 +1,70 @@
+# =========================================================
+# Vitis / Vitis HLS / XRT build outputs
+# =========================================================
+
+# v++ / HLS build trees and caches
+**/_x/
+**/build/
+**/.Xil/
+**/.ipcache/
+**/.autopilot/
+**/_ide/
+**/xsim.dir/
+
+# HLS C-sim / co-sim work directories
+**/csim/
+**/cosim/
+**/hls_csim/
+**/hls_cosim/
+**/hls_work/
+
+# Emulation / runtime sandboxes
+**/.run/
+**/_vimage/
+emconfig.json
+*.mmap.dat
+
+# =========================================================
+# Generated binaries and IP
+# =========================================================
+*.xclbin
+*.xo
+*.xo.*
+*.ltx
+*.zip
+
+# Compiled host executables (produced from host.cpp)
+**/host/hw
+**/host/hw_emu
+**/host/sw_emu
+
+# =========================================================
+# Logs, reports, traces, profiling
+# =========================================================
+*.log
+*.jou
+*.str
+*.pb
+*.wcfg
+*.wdb
+*.wpc
+*.csv
+*.run_summary
+v++_*.log
+xcd.log
+
+# =========================================================
+# Misc
+# =========================================================
+*.o
+*.obj
+.cache/
+
+# =========================================================
+# Keep measured benchmark results (override *.csv rule above)
+# =========================================================
+!results/
+!results/*.csv
+!results/*.md
+
+IMPROVEMENTS.md
