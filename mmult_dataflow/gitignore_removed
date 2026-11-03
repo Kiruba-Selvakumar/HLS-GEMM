@@ -1,0 +1,7 @@
+build/
+**/build/
+*.xclbin
+*.xo
+*.log
+*.jou
+.DS_Store
