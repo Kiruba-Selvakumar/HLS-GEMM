@@ -1,0 +1,121 @@
+# ======================================================
+# 📁 General Build Artifacts
+# ======================================================
+build/
+_build/
+bin/
+obj/
+*.o
+*.out
+*.exe
+*.a
+*.so
+*.dll
+
+# ======================================================
+# 🧠 Xilinx Vitis / Alveo Specific
+# ======================================================
+
+# Hardware & Emulation Builds
+*.xclbin
+*.xo
+*.xsa
+*.xpfm
+*.xpr
+*.bit
+*.ltx
+*.xrt
+emconfig.json
+
+# Vitis build directories
+.xbuild/
+._x/
+.hw/
+.hw_emu/
+.sw_emu/
+.xo/
+.xsa/
+.pack/
+.temp/
+.log/
+.metadata/
+.reports/
+solutions/
+temp/
+logs/
+v++_*
+_v++
+
+# Vitis/Vivado intermediate run directories
+*.cache/
+*.runs/
+*.srcs/
+*.ip_user_files/
+*.ip_generated_files/
+*.impl/
+*.sim/
+*.hw/
+*.hw_emu/
+*.sw_emu/
+
+# Vivado-related auxiliary files
+*.jou
+*.log
+*.str
+*.rpt
+*.pb
+*.dcp
+*.wdb
+*.xml
+*.html
+*.ltx
+
+# ======================================================
+# 💻 Emulation Outputs
+# ======================================================
+*.vcd
+*.saif
+*.wcfg
+*.wdb
+xsim.dir/
+*.xsim/
+*.xsa
+emulation/
+_emulation/
+xrt.ini
+
+# ======================================================
+# 🧩 Host Application Artifacts
+# ======================================================
+*.log
+*.tmp
+*.bak
+*.data
+*.dat
+*.csv
+*.json
+*.bin
+
+# ======================================================
+# ⚙️ IDE / Editor / OS Files
+# ======================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*.DS_Store
+Thumbs.db
+
+# ======================================================
+# 🐍 Python Artifacts
+# ======================================================
+__pycache__/
+*.pyc
+*.pyo
+
+# ======================================================
+# 🔐 Environment & Config Files
+# ======================================================
+.env
+*.ini
+*.cfg
